@@ -1,0 +1,13 @@
+﻿**/bin/
+**/obj/
+**/.vs/
+**/.git/
+**/.dart_tool/
+**/build/
+**/.idea/
+**/.gradle/
+**/android/local.properties
+**/android/key.properties
+.env
+.env.*
+!.env.example

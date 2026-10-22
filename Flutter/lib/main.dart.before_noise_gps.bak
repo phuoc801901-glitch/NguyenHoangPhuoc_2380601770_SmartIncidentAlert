@@ -1,0 +1,734 @@
+﻿import 'dart:convert';
+import 'package:flutter/material.dart';
+import 'package:http/http.dart' as http;
+
+void main() => runApp(const SmartIncidentApp());
+
+class SmartIncidentApp extends StatelessWidget {
+  const SmartIncidentApp({super.key});
+
+  @override
+  Widget build(BuildContext context) => MaterialApp(
+        debugShowCheckedModeBanner: false,
+        title: 'Smart AI Incident Alert',
+        theme: ThemeData(
+          colorScheme: ColorScheme.fromSeed(seedColor: Colors.red),
+          useMaterial3: true,
+        ),
+        home: const AuthPage(),
+      );
+}
+
+class AuthPage extends StatefulWidget {
+  const AuthPage({super.key});
+
+  @override
+  State<AuthPage> createState() => _AuthPageState();
+}
+
+class _AuthPageState extends State<AuthPage> {
+  final username = TextEditingController();
+  final email = TextEditingController();
+  final fullname = TextEditingController();
+  final password = TextEditingController();
+  final confirmPassword = TextEditingController();
+
+  bool isRegister = false;
+  bool loading = false;
+  bool hidePassword = true;
+
+  static const baseUrl = 'http://10.0.2.2:5166/api/Auth';
+
+  void message(String value) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(value), duration: const Duration(seconds: 5)),
+    );
+  }
+
+  Future<void> submit() async {
+    if (username.text.trim().isEmpty || password.text.isEmpty) {
+      message('Vui lòng nhập tên đăng nhập và mật khẩu.');
+      return;
+    }
+
+    if (isRegister) {
+      if (email.text.trim().isEmpty || fullname.text.trim().isEmpty) {
+        message('Vui lòng nhập họ tên và email.');
+        return;
+      }
+      if (!RegExp(r'^[^@\s]+@[^@\s]+\.[^@\s]+$')
+          .hasMatch(email.text.trim())) {
+        message('Email không hợp lệ.');
+        return;
+      }
+      if (password.text != confirmPassword.text) {
+        message('Mật khẩu xác nhận không khớp.');
+        return;
+      }
+    }
+
+    setState(() => loading = true);
+    try {
+      final uri = Uri.parse(
+        '$baseUrl/${isRegister ? 'register' : 'login'}',
+      );
+
+      final body = isRegister
+          ? {
+              'userName': username.text.trim(),
+              'email': email.text.trim(),
+              'password': password.text,
+              'fullName': fullname.text.trim(),
+            }
+          : {
+              'userName': username.text.trim(),
+              'password': password.text,
+            };
+
+      final response = await http
+          .post(
+            uri,
+            headers: {'Content-Type': 'application/json'},
+            body: jsonEncode(body),
+          )
+          .timeout(const Duration(seconds: 20));
+
+      debugPrint('AUTH STATUS: ${response.statusCode}');
+      debugPrint('AUTH RESPONSE: ${response.body}');
+
+      if (!mounted) return;
+
+      if (response.statusCode >= 200 && response.statusCode < 300) {
+        if (isRegister) {
+          message('Đăng ký thành công. Hãy đăng nhập.');
+          setState(() {
+            isRegister = false;
+            password.clear();
+            confirmPassword.clear();
+          });
+          return;
+        }
+
+        final data = jsonDecode(response.body) as Map<String, dynamic>;
+
+        // Login moi: backend gui OTP va chua cap JWT.
+        if (data['expiresInSeconds'] != null) {
+          await verifyOtpFlow(
+            data['userName']?.toString() ?? username.text.trim(),
+          );
+          return;
+        }
+
+        final token = data['accessToken']?.toString() ?? '';
+        final name = data['userName']?.toString() ?? username.text.trim();
+        final roles = data['roles'] is List
+            ? (data['roles'] as List).map((e) => e.toString()).toList()
+            : <String>[];
+
+        if (token.isEmpty) {
+          message('Đăng nhập thành công nhưng API không trả accessToken.');
+          return;
+        }
+
+        Navigator.of(context).pushReplacement(
+          MaterialPageRoute(
+            builder: (_) => DashboardPage(
+              username: name,
+              roles: roles,
+              token: token,
+            ),
+          ),
+        );
+      } else {
+        message('Lỗi ${response.statusCode}: ${response.body}');
+      }
+    } catch (e) {
+      debugPrint('AUTH ERROR: $e');
+      message('Lỗi kết nối: $e');
+    } finally {
+      if (mounted) setState(() => loading = false);
+    }
+  }
+
+  Future<void> verifyOtpFlow(String name) async {
+    final otpController = TextEditingController();
+
+    try {
+      while (mounted) {
+        otpController.clear();
+
+        final otp = await showDialog<String>(
+          context: context,
+          barrierDismissible: false,
+          builder: (dialogContext) => AlertDialog(
+            title: const Text('Xác minh email'),
+            content: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text(
+                  'Nhập mã OTP 6 chữ số vừa được gửi đến email đăng ký.',
+                ),
+                const SizedBox(height: 16),
+                TextField(
+                  controller: otpController,
+                  autofocus: true,
+                  keyboardType: TextInputType.number,
+                  maxLength: 6,
+                  decoration: const InputDecoration(
+                    labelText: 'Mã OTP',
+                    prefixIcon: Icon(Icons.mark_email_read),
+                    border: OutlineInputBorder(),
+                    counterText: '',
+                  ),
+                ),
+              ],
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(dialogContext),
+                child: const Text('Huỷ'),
+              ),
+              ElevatedButton(
+                onPressed: () {
+                  final value = otpController.text.trim();
+                  if (RegExp(r'^\d{6}$').hasMatch(value)) {
+                    Navigator.pop(dialogContext, value);
+                  }
+                },
+                child: const Text('Xác minh'),
+              ),
+            ],
+          ),
+        );
+
+        if (otp == null || !mounted) return;
+
+        try {
+          final response = await http.post(
+            Uri.parse('$baseUrl/verify-otp'),
+            headers: {'Content-Type': 'application/json'},
+            body: jsonEncode({
+              'userName': name,
+              'otp': otp,
+            }),
+          ).timeout(const Duration(seconds: 20));
+
+          debugPrint('OTP STATUS: ${response.statusCode}');
+          // Khong in accessToken ra log.
+
+          if (!mounted) return;
+
+          if (response.statusCode >= 200 &&
+              response.statusCode < 300) {
+            final data =
+                jsonDecode(response.body) as Map<String, dynamic>;
+            final token = data['accessToken']?.toString() ?? '';
+            final userName =
+                data['userName']?.toString() ?? name;
+            final roles = data['roles'] is List
+                ? (data['roles'] as List)
+                    .map((e) => e.toString())
+                    .toList()
+                : <String>[];
+
+            if (token.isEmpty) {
+              message('API xác minh không trả accessToken.');
+              return;
+            }
+
+            Navigator.of(context).pushReplacement(
+              MaterialPageRoute(
+                builder: (_) => DashboardPage(
+                  username: userName,
+                  roles: roles,
+                  token: token,
+                ),
+              ),
+            );
+            return;
+          }
+
+          message('OTP chưa đúng hoặc đã hết hạn. Vui lòng thử lại.');
+        } catch (e) {
+          if (!mounted) return;
+          message('Lỗi xác minh OTP: $e');
+          return;
+        }
+      }
+    } finally {
+      otpController.dispose();
+    }
+  }
+
+  Widget field({
+    required TextEditingController controller,
+    required String label,
+    required IconData icon,
+    bool secret = false,
+  }) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 13),
+      child: TextField(
+        controller: controller,
+        obscureText: secret && hidePassword,
+        keyboardType: label == 'Email'
+            ? TextInputType.emailAddress
+            : TextInputType.text,
+        decoration: InputDecoration(
+          labelText: label,
+          prefixIcon: Icon(icon),
+          border: const OutlineInputBorder(),
+          suffixIcon: secret
+              ? IconButton(
+                  icon: Icon(
+                    hidePassword ? Icons.visibility : Icons.visibility_off,
+                  ),
+                  onPressed: () => setState(() => hidePassword = !hidePassword),
+                )
+              : null,
+        ),
+      ),
+    );
+  }
+
+  @override
+  void dispose() {
+    username.dispose();
+    email.dispose();
+    fullname.dispose();
+    password.dispose();
+    confirmPassword.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => Scaffold(
+        appBar: AppBar(
+          title: const Text('Smart AI Incident Alert'),
+          backgroundColor: Colors.red,
+          foregroundColor: Colors.white,
+        ),
+        body: Center(
+          child: SingleChildScrollView(
+            padding: const EdgeInsets.all(24),
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 420),
+              child: Column(
+                children: [
+                  const Icon(Icons.health_and_safety,
+                      size: 76, color: Colors.red),
+                  const SizedBox(height: 12),
+                  Text(
+                    isRegister ? 'TẠO TÀI KHOẢN' : 'ĐĂNG NHẬP',
+                    style: const TextStyle(
+                        fontSize: 25, fontWeight: FontWeight.bold),
+                  ),
+                  const SizedBox(height: 24),
+                  if (isRegister) ...[
+                    field(controller: fullname, label: 'Họ và tên',
+                        icon: Icons.badge),
+                    field(controller: email, label: 'Email',
+                        icon: Icons.email),
+                  ],
+                  field(controller: username, label: 'Tên đăng nhập',
+                      icon: Icons.person),
+                  field(controller: password, label: 'Mật khẩu',
+                      icon: Icons.lock, secret: true),
+                  if (isRegister)
+                    field(controller: confirmPassword,
+                        label: 'Xác nhận mật khẩu',
+                        icon: Icons.lock_outline, secret: true),
+                  const SizedBox(height: 10),
+                  SizedBox(
+                    width: double.infinity,
+                    height: 50,
+                    child: ElevatedButton(
+                      onPressed: loading ? null : submit,
+                      style: ElevatedButton.styleFrom(
+                          backgroundColor: Colors.red,
+                          foregroundColor: Colors.white),
+                      child: loading
+                          ? const CircularProgressIndicator(color: Colors.white)
+                          : Text(isRegister ? 'ĐĂNG KÝ' : 'ĐĂNG NHẬP'),
+                    ),
+                  ),
+                  TextButton(
+                    onPressed: loading
+                        ? null
+                        : () => setState(() {
+                              isRegister = !isRegister;
+                              hidePassword = true;
+                            }),
+                    child: Text(isRegister
+                        ? 'Đã có tài khoản? Đăng nhập'
+                        : 'Chưa có tài khoản? Đăng ký email'),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      );
+}
+
+class DashboardPage extends StatefulWidget {
+  final String username;
+  final List<String> roles;
+  final String token;
+
+  const DashboardPage({
+    super.key,
+    required this.username,
+    required this.roles,
+    required this.token,
+  });
+
+  @override
+  State<DashboardPage> createState() => _DashboardPageState();
+}
+
+class _DashboardPageState extends State<DashboardPage> {
+  static const productUrl = 'http://10.0.2.2:5166/api/ProductApi';
+
+  List<Map<String, dynamic>> products = [];
+  bool loading = false;
+
+  bool get isAdmin =>
+      widget.roles.any((r) => r.toLowerCase() == 'admin');
+
+  bool get isEmployee =>
+      widget.roles.any((r) => r.toLowerCase() == 'employee');
+
+  String get dashboardTitle {
+    if (isAdmin) return 'Dashboard quản trị Admin';
+    if (isEmployee) return 'Dashboard Nhân viên';
+    return 'Dashboard Người dùng';
+  }
+
+  Map<String, String> get headers => {
+        'Content-Type': 'application/json',
+        'Authorization': 'Bearer ${widget.token}',
+      };
+
+  void message(String value) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(value), duration: const Duration(seconds: 4)),
+    );
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    loadProducts();
+  }
+
+  Future<void> loadProducts() async {
+    setState(() => loading = true);
+    try {
+      final response = await http.get(
+        Uri.parse(productUrl),
+        headers: headers,
+      ).timeout(const Duration(seconds: 20));
+
+      debugPrint('PRODUCT GET ${response.statusCode}: ${response.body}');
+
+      if (response.statusCode == 200) {
+        final data = jsonDecode(response.body);
+        if (data is List) {
+          setState(() {
+            products = data
+                .map((e) => Map<String, dynamic>.from(e as Map))
+                .toList();
+          });
+        }
+      } else if (response.statusCode == 401) {
+        message('Phiên đăng nhập hết hạn. Vui lòng đăng nhập lại.');
+      } else {
+        message('Không tải được sản phẩm: ${response.statusCode}');
+      }
+    } catch (e) {
+      message('Lỗi tải sản phẩm: $e');
+    } finally {
+      if (mounted) setState(() => loading = false);
+    }
+  }
+
+  Future<void> productForm({Map<String, dynamic>? product}) async {
+    // Backend hiện tại chưa tách quyền CRUD theo role.
+    // Chỉ hiển thị nút chỉnh sửa cho Admin trên giao diện.
+    final name = TextEditingController(
+      text: product?['name']?.toString() ?? '',
+    );
+    final price = TextEditingController(
+      text: product?['price']?.toString() ?? '',
+    );
+    final image = TextEditingController(
+      text: product?['image']?.toString() ?? '',
+    );
+    final description = TextEditingController(
+      text: product?['description']?.toString() ?? '',
+    );
+
+    final formKey = GlobalKey<FormState>();
+
+    final saved = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: Text(product == null ? 'Thêm sản phẩm' : 'Sửa sản phẩm'),
+        content: SingleChildScrollView(
+          child: Form(
+            key: formKey,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                TextFormField(
+                  controller: name,
+                  decoration: const InputDecoration(labelText: 'Tên sản phẩm'),
+                  validator: (v) =>
+                      v == null || v.trim().isEmpty ? 'Nhập tên sản phẩm' : null,
+                ),
+                TextFormField(
+                  controller: price,
+                  keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                  decoration: const InputDecoration(labelText: 'Giá'),
+                  validator: (v) {
+                    final p = double.tryParse((v ?? '').replaceAll(',', '.'));
+                    if (p == null || p < 0) return 'Nhập giá hợp lệ';
+                    return null;
+                  },
+                ),
+                TextFormField(
+                  controller: image,
+                  decoration: const InputDecoration(labelText: 'Đường dẫn ảnh (tuỳ chọn)'),
+                ),
+                TextFormField(
+                  controller: description,
+                  maxLines: 3,
+                  decoration: const InputDecoration(labelText: 'Mô tả'),
+                ),
+              ],
+            ),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, false),
+            child: const Text('Huỷ'),
+          ),
+          ElevatedButton(
+            onPressed: () {
+              if (formKey.currentState!.validate()) {
+                Navigator.pop(dialogContext, true);
+              }
+            },
+            child: const Text('Lưu'),
+          ),
+        ],
+      ),
+    );
+
+    if (saved == true) {
+      try {
+        final id = product?['id'];
+        final priceValue =
+            double.parse(price.text.trim().replaceAll(',', '.'));
+
+        final body = jsonEncode({
+          if (product != null) 'id': id,
+          'name': name.text.trim(),
+          'price': priceValue,
+          'image': image.text.trim(),
+          'description': description.text.trim(),
+        });
+
+        final response = product == null
+            ? await http.post(Uri.parse(productUrl), headers: headers, body: body)
+            : await http.put(
+                Uri.parse('$productUrl/$id'),
+                headers: headers,
+                body: body,
+              );
+
+        debugPrint('PRODUCT SAVE ${response.statusCode}: ${response.body}');
+
+        if (response.statusCode == 200 ||
+            response.statusCode == 201 ||
+            response.statusCode == 204) {
+          message(product == null ? 'Đã thêm sản phẩm.' : 'Đã cập nhật sản phẩm.');
+          await loadProducts();
+        } else {
+          message('Lưu thất bại (${response.statusCode}): ${response.body}');
+        }
+      } catch (e) {
+        message('Lỗi lưu sản phẩm: $e');
+      }
+    }
+
+    name.dispose();
+    price.dispose();
+    image.dispose();
+    description.dispose();
+  }
+
+  Future<void> deleteProduct(Map<String, dynamic> product) async {
+    final id = product['id'];
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Xác nhận xoá'),
+        content: Text('Bạn có chắc muốn xoá "${product['name']}"?'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Huỷ'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Xoá', style: TextStyle(color: Colors.red)),
+          ),
+        ],
+      ),
+    );
+
+    if (confirm != true) return;
+
+    try {
+      final response = await http.delete(
+        Uri.parse('$productUrl/$id'),
+        headers: headers,
+      );
+
+      debugPrint('PRODUCT DELETE ${response.statusCode}: ${response.body}');
+
+      if (response.statusCode == 200 || response.statusCode == 204) {
+        message('Đã xoá sản phẩm.');
+        await loadProducts();
+      } else {
+        message('Xoá thất bại (${response.statusCode}): ${response.body}');
+      }
+    } catch (e) {
+      message('Lỗi xoá sản phẩm: $e');
+    }
+  }
+
+  void logout() {
+    Navigator.of(context).pushAndRemoveUntil(
+      MaterialPageRoute(builder: (_) => const AuthPage()),
+      (_) => false,
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) => Scaffold(
+        appBar: AppBar(
+          title: const Text('Smart AI Incident Alert'),
+          backgroundColor: Colors.red,
+          foregroundColor: Colors.white,
+          actions: [
+            IconButton(
+              onPressed: loadProducts,
+              icon: const Icon(Icons.refresh),
+              tooltip: 'Tải lại',
+            ),
+            IconButton(
+              onPressed: logout,
+              icon: const Icon(Icons.logout),
+              tooltip: 'Đăng xuất',
+            ),
+          ],
+        ),
+        floatingActionButton: isAdmin
+            ? FloatingActionButton(
+                onPressed: () => productForm(),
+                backgroundColor: Colors.red,
+                foregroundColor: Colors.white,
+                child: const Icon(Icons.add),
+              )
+            : null,
+        body: RefreshIndicator(
+          onRefresh: loadProducts,
+          child: ListView(
+            padding: const EdgeInsets.all(16),
+            children: [
+              Icon(
+                isAdmin
+                    ? Icons.admin_panel_settings
+                    : isEmployee
+                        ? Icons.badge
+                        : Icons.person,
+                size: 62,
+                color: Colors.red,
+              ),
+              const SizedBox(height: 8),
+              Text(
+                dashboardTitle,
+                textAlign: TextAlign.center,
+                style: const TextStyle(fontSize: 22, fontWeight: FontWeight.bold),
+              ),
+              Text('Xin chào, ${widget.username} • ${widget.roles.join(', ')}',
+                  textAlign: TextAlign.center),
+              const SizedBox(height: 20),
+              const Text('QUẢN LÝ SẢN PHẨM',
+                  style: TextStyle(fontWeight: FontWeight.bold, fontSize: 18)),
+              const SizedBox(height: 8),
+              if (!isAdmin)
+                const Card(
+                  child: ListTile(
+                    leading: Icon(Icons.info_outline),
+                    title: Text('Chế độ xem'),
+                    subtitle: Text('Tài khoản này không có nút thêm, sửa hoặc xoá.'),
+                  ),
+                ),
+              if (loading) const LinearProgressIndicator(),
+              if (!loading && products.isEmpty)
+                const Padding(
+                  padding: EdgeInsets.all(24),
+                  child: Text('Chưa có sản phẩm. Nhấn làm mới để tải lại.',
+                      textAlign: TextAlign.center),
+                ),
+              ...products.map((p) {
+                final id = p['id'];
+                final name = p['name']?.toString() ?? 'Không tên';
+                final price = p['price']?.toString() ?? '0';
+                final image = p['image']?.toString() ?? '';
+                final description = p['description']?.toString() ?? '';
+
+                return Card(
+                  child: ListTile(
+                    leading: image.startsWith('http')
+                        ? Image.network(
+                            image,
+                            width: 52,
+                            height: 52,
+                            fit: BoxFit.cover,
+                            errorBuilder: (_, __, ___) =>
+                                const Icon(Icons.inventory_2, size: 40),
+                          )
+                        : const Icon(Icons.inventory_2, size: 40),
+                    title: Text(name),
+                    subtitle: Text('$price đ\n$description'),
+                    isThreeLine: true,
+                    trailing: isAdmin
+                        ? PopupMenuButton<String>(
+                            onSelected: (value) {
+                              if (value == 'edit') productForm(product: p);
+                              if (value == 'delete') deleteProduct(p);
+                            },
+                            itemBuilder: (_) => const [
+                              PopupMenuItem(value: 'edit', child: Text('Sửa')),
+                              PopupMenuItem(value: 'delete', child: Text('Xoá')),
+                            ],
+                          )
+                        : null,
+                  ),
+                );
+              }),
+            ],
+          ),
+        ),
+      );
+}
+
